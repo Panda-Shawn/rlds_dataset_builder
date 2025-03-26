@@ -7,7 +7,9 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import sys
-from LIBERO_Spatial.conversion_utils import MultiThreadedDatasetBuilder
+import sys
+sys.path.append('.')
+from aloha1_put_X_into_pot_300_demos.conversion_utils import MultiThreadedDatasetBuilder
 
 
 def _generate_examples(paths) -> Iterator[Tuple[str, Any]]:
@@ -15,40 +17,31 @@ def _generate_examples(paths) -> Iterator[Tuple[str, Any]]:
     # the line below needs to be *inside* generate_examples so that each worker creates it's own model
     # creating one shared model outside this function would cause a deadlock
 
-    def _parse_example(episode_path, demo_id):
-        # load raw data
+    def _parse_example(episode_path):
+        # Load raw data
         with h5py.File(episode_path, "r") as F:
-            if f"demo_{demo_id}" not in F['data'].keys():
-                return None # skip episode if the demo doesn't exist (e.g. due to failed demo)
-            actions = F['data'][f"demo_{demo_id}"]["actions"][()]
-            states = F['data'][f"demo_{demo_id}"]["obs"]["ee_states"][()]
-            gripper_states = F['data'][f"demo_{demo_id}"]["obs"]["gripper_states"][()]
-            joint_states = F['data'][f"demo_{demo_id}"]["obs"]["joint_states"][()]
-            images = F['data'][f"demo_{demo_id}"]["obs"]["agentview_rgb"][()]
-            wrist_images = F['data'][f"demo_{demo_id}"]["obs"]["eye_in_hand_rgb"][()]
-            file_path = F['data'][f"demo_{demo_id}"]["episode_id"][()].decode('utf-8')
-            episode_id = "0"
+            actions = F["/action"][()]
+            states = F["/observations/qpos"][()]
+            images = F["/observations/images/cam_high"][()]  # Primary camera (top-down view)
+            left_wrist_images = F["/observations/images/cam_left_wrist"][()]  # Left wrist camera
+            right_wrist_images = F["/observations/images/cam_right_wrist"][()]  # Right wrist camera
+            low_cam_images = F["/observations/images/cam_low"][()]  # Low third-person camera
 
-        # compute language instruction
-        raw_file_string = os.path.basename(episode_path).split('/')[-1]
-        words = raw_file_string[:-10].split("_")
-        command = ''
-        for w in words:
-            if "SCENE" in w:
-                command = ''
-                continue
-            command = command + w + ' '
-        command = command[:-1]
+        # Get language instruction
+        # Assumes filepaths look like: "/PATH/TO/ALOHA/PREPROCESSED/DATASETS/<dataset_name>/train/episode_0.hdf5"
+        raw_file_string = episode_path.split('/')[-3]  # E.g., '/scr/moojink/data/aloha1_preprocessed/put_green_pepper_into_pot/train/episode_0.hdf5' -> put_green_pepper_into_pot
+        command = " ".join(raw_file_string.split("_"))
 
-        # assemble episode --> here we're assuming demos so we set reward to 1 at the end
+        # Assemble episode: here we're assuming demos so we set reward to 1 at the end
         episode = []
         for i in range(actions.shape[0]):
             episode.append({
                 'observation': {
-                    'image': images[i][::-1,::-1],
-                    'wrist_image': wrist_images[i][::-1,::-1],
-                    'state': np.asarray(np.concatenate((states[i], gripper_states[i]), axis=-1), np.float32),
-                    'joint_state': np.asarray(joint_states[i], dtype=np.float32),
+                    'image': images[i],
+                    'left_wrist_image': left_wrist_images[i],
+                    'right_wrist_image': right_wrist_images[i],
+                    'low_cam_image': low_cam_images[i],
+                    'state': np.asarray(states[i], np.float32),
                 },
                 'action': np.asarray(actions[i], dtype=np.float32),
                 'discount': 1.0,
@@ -59,33 +52,24 @@ def _generate_examples(paths) -> Iterator[Tuple[str, Any]]:
                 'language_instruction': command,
             })
 
-        # create output data sample
+        # Create output data sample
         sample = {
             'steps': episode,
             'episode_metadata': {
-                'file_path': file_path,
-                'episode_id': episode_id,
+                'file_path': episode_path
             }
         }
 
-        # if you want to skip an example for whatever reason, simply return None
-        return episode_path + f"_{demo_id}", sample
+        # If you want to skip an example for whatever reason, simply return None
+        return episode_path, sample
 
-    # for smallish datasets, use single-thread parsing
+    # For smallish datasets, use single-thread parsing
     for sample in paths:
-        with h5py.File(sample, "r") as F:
-            n_demos = len(F['data'])
-        idx = 0
-        cnt = 0
-        while cnt < n_demos:
-            ret = _parse_example(sample, idx)
-            if ret is not None:
-                cnt += 1
-            idx += 1
-            yield ret
+        ret = _parse_example(sample)
+        yield ret
 
 
-class LIBEROSpatial(MultiThreadedDatasetBuilder):
+class aloha1_put_X_into_pot_300_demos(MultiThreadedDatasetBuilder):
     """DatasetBuilder for example dataset."""
 
     VERSION = tfds.core.Version('1.0.0')
@@ -110,27 +94,34 @@ class LIBEROSpatial(MultiThreadedDatasetBuilder):
                             encoding_format='jpeg',
                             doc='Main camera RGB observation.',
                         ),
-                        'wrist_image': tfds.features.Image(
+                        'left_wrist_image': tfds.features.Image(
                             shape=(256, 256, 3),
                             dtype=np.uint8,
                             encoding_format='jpeg',
-                            doc='Wrist camera RGB observation.',
+                            doc='Left wrist camera RGB observation.',
+                        ),
+                        'right_wrist_image': tfds.features.Image(
+                            shape=(256, 256, 3),
+                            dtype=np.uint8,
+                            encoding_format='jpeg',
+                            doc='Right wrist camera RGB observation.',
+                        ),
+                        'low_cam_image': tfds.features.Image(
+                            shape=(256, 256, 3),
+                            dtype=np.uint8,
+                            encoding_format='jpeg',
+                            doc='Lower camera RGB observation.',
                         ),
                         'state': tfds.features.Tensor(
-                            shape=(8,),
+                            shape=(14,),
                             dtype=np.float32,
-                            doc='Robot EEF state (6D pose, 2D gripper).',
+                            doc='Robot joint state (7D left arm + 7D right arm).',
                         ),
-                        'joint_state': tfds.features.Tensor(
-                            shape=(7,),
-                            dtype=np.float32,
-                            doc='Robot joint angles.',
-                        )
                     }),
                     'action': tfds.features.Tensor(
-                        shape=(7,),
+                        shape=(14,),
                         dtype=np.float32,
-                        doc='Robot EEF action.',
+                        doc='Robot arm action.',
                     ),
                     'discount': tfds.features.Scalar(
                         dtype=np.float32,
@@ -160,14 +151,12 @@ class LIBEROSpatial(MultiThreadedDatasetBuilder):
                     'file_path': tfds.features.Text(
                         doc='Path to the original data file.'
                     ),
-                    'episode_id': tfds.features.Text(
-                        doc='Episode ID.'
-                    ),
                 }),
             }))
 
     def _split_paths(self):
         """Define filepaths for data splits."""
         return {
-            "train": glob.glob("/data/lzx/LabelCoT/LIBERO/libero/datasets/libero_spatial_selected/*.hdf5"),
+            "train": glob.glob("/scr/moojink/data/aloha1_preprocessed/put_green_pepper_into_pot/train/*.hdf5") + glob.glob("/scr/moojink/data/aloha1_preprocessed/put_red_pepper_into_pot/train/*.hdf5") + glob.glob("/scr/moojink/data/aloha1_preprocessed/put_yellow_corn_into_pot/train/*.hdf5"),
+            "val": glob.glob("/scr/moojink/data/aloha1_preprocessed/put_green_pepper_into_pot/val/*.hdf5") + glob.glob("/scr/moojink/data/aloha1_preprocessed/put_red_pepper_into_pot/val/*.hdf5") + glob.glob("/scr/moojink/data/aloha1_preprocessed/put_yellow_corn_into_pot/val/*.hdf5"),
         }

@@ -26,6 +26,8 @@ def _generate_examples(paths) -> Iterator[Tuple[str, Any]]:
             joint_states = F['data'][f"demo_{demo_id}"]["obs"]["joint_states"][()]
             images = F['data'][f"demo_{demo_id}"]["obs"]["agentview_rgb"][()]
             wrist_images = F['data'][f"demo_{demo_id}"]["obs"]["eye_in_hand_rgb"][()]
+            file_path = F['data'][f"demo_{demo_id}"]["episode_id"][()].decode('utf-8')
+            episode_id = "0"
 
         # compute language instruction
         raw_file_string = os.path.basename(episode_path).split('/')[-1]
@@ -61,7 +63,8 @@ def _generate_examples(paths) -> Iterator[Tuple[str, Any]]:
         sample = {
             'steps': episode,
             'episode_metadata': {
-                'file_path': episode_path
+                'file_path': file_path,
+                'episode_id': episode_id,
             }
         }
 
@@ -157,11 +160,14 @@ class LIBEROGoal(MultiThreadedDatasetBuilder):
                     'file_path': tfds.features.Text(
                         doc='Path to the original data file.'
                     ),
+                    'episode_id': tfds.features.Text(
+                        doc='Episode ID.'
+                    ),
                 }),
             }))
 
     def _split_paths(self):
         """Define filepaths for data splits."""
         return {
-            "train": glob.glob("/PATH/TO/LIBERO/libero/datasets/libero_goal_no_noops/*.hdf5"),
+            "train": glob.glob("/data/lzx/LabelCoT/LIBERO/libero/datasets/libero_goal_selected/*.hdf5"),
         }
